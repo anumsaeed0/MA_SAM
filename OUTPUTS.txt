@@ -455,16 +455,16 @@ Collecting torchvision
 Collecting torchaudio
   Downloading https://download.pytorch.org/whl/cu121/torchaudio-2.5.1%2Bcu121-cp310-cp310-win_amd64.whl (4.1 MB)
      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.1/4.1 MB 31.0 MB/s  0:00:00
-Requirement already satisfied: filelock in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from torch) (3.20.3)
-Requirement already satisfied: typing-extensions>=4.8.0 in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from torch) (4.15.0)
-Requirement already satisfied: networkx in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from torch) (3.4.2)
-Requirement already satisfied: jinja2 in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from torch) (3.1.6)
-Requirement already satisfied: fsspec in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from torch) (2026.2.0)
-Requirement already satisfied: sympy==1.13.1 in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from torch) (1.13.1)
-Requirement already satisfied: mpmath<1.4,>=1.1.0 in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from sympy==1.13.1->torch) (1.3.0)
-Requirement already satisfied: numpy in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from torchvision) (1.23.1)
-Requirement already satisfied: pillow!=8.3.*,>=5.3.0 in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from torchvision) (11.1.0)
-Requirement already satisfied: MarkupSafe>=2.0 in c:\users\anaum_ssl\.conda\envs\masam\lib\site-packages (from jinja2->torch) (3.0.2)
+Requirement already satisfied: filelock in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from torch) (3.20.3)
+Requirement already satisfied: typing-extensions>=4.8.0 in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from torch) (4.15.0)
+Requirement already satisfied: networkx in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from torch) (3.4.2)
+Requirement already satisfied: jinja2 in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from torch) (3.1.6)
+Requirement already satisfied: fsspec in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from torch) (2026.2.0)
+Requirement already satisfied: sympy==1.13.1 in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from torch) (1.13.1)
+Requirement already satisfied: mpmath<1.4,>=1.1.0 in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from sympy==1.13.1->torch) (1.3.0)
+Requirement already satisfied: numpy in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from torchvision) (1.23.1)
+Requirement already satisfied: pillow!=8.3.*,>=5.3.0 in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from torchvision) (11.1.0)
+Requirement already satisfied: MarkupSafe>=2.0 in c:\users\ADMIN\.conda\envs\masam\lib\site-packages (from jinja2->torch) (3.0.2)
 Installing collected packages: torch, torchvision, torchaudio
 Successfully installed torch-2.5.1+cu121 torchaudio-2.5.1+cu121 torchvision-0.20.1+cu121
 
