@@ -223,8 +223,16 @@ if __name__ == '__main__':
     
     if not os.path.exists('./testing_log'):
         os.mkdir('./testing_log')
-    logging.basicConfig(filename= './testing_log/' + args.adapt_ckpt.split('/')[-3] + '_log.txt', level=logging.INFO,
-                        format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
+    ckpt_name = os.path.splitext(os.path.basename(args.adapt_ckpt))[0]
+    logging.basicConfig(
+        filename=f'./testing_log/{ckpt_name}_log.txt',
+        level=logging.INFO,
+        format='[%(asctime)s.%(msecs)03d] %(message)s',
+        datefmt='%H:%M:%S'
+    )
+
+    # logging.basicConfig(filename= './testing_log/' + args.adapt_ckpt.split('/')[-3] + '_log.txt', level=logging.INFO,
+    #                     format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
 
