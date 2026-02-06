@@ -372,61 +372,141 @@ class Fact_tt_Sam(nn.Module):
 
         merged_dict = {**a_tensors, **b_tensors, **FacTu_tensors, **FacTv_tensors, **prompt_encoder_tensors, **mask_decoder_tensors, **adapter_tensor}
         torch.save(merged_dict, filename)
-
+    
     def load_parameters(self, filename: str) -> None:
-        r"""Only safetensors is supported now.
+        r"""
+        Safely load checkpoint parameters for FacT_tt Sam model.
 
-        pip install safetensor if you do not have one installed yet.\
-
-        load both FacT_tt and fc parameters.
+        Supports:
+            - q_FacTs / v_FacTs
+            - FacTu / FacTv
+            - prompt_encoder
+            - mask_decoder (skips missing/mismatched keys)
+            - adapter weights (skips missing/mismatched keys)
         """
-
-        assert filename.endswith(".pt") or filename.endswith('.pth')
+        assert filename.endswith(".pt") or filename.endswith(".pth")
 
         state_dict = torch.load(filename)
 
+        # 1. Load q_FacTs and v_FacTs
         for i, q_FacTs in enumerate(self.q_FacTs):
-            saved_key = f"q_FacTs_{i:03d}"
-            saved_tensor = state_dict[saved_key]
-            q_FacTs.weight = Parameter(saved_tensor)
+            key = f"q_FacTs_{i:03d}"
+            if key in state_dict:
+                q_FacTs.weight = nn.Parameter(state_dict[key])
+            else:
+                print(f"Skipping missing checkpoint key: {key}")
 
         for i, v_FacTs in enumerate(self.v_FacTs):
-            saved_key = f"v_FacTs_{i:03d}"
-            saved_tensor = state_dict[saved_key]
-            v_FacTs.weight = Parameter(saved_tensor)
+            key = f"v_FacTs_{i:03d}"
+            if key in state_dict:
+                v_FacTs.weight = nn.Parameter(state_dict[key])
+            else:
+                print(f"Skipping missing checkpoint key: {key}")
 
+        # 2. Load SAM model state dict
         sam_dict = self.sam.state_dict()
-        sam_keys = sam_dict.keys()
+        sam_keys = list(sam_dict.keys())
 
+        # Helper function to safely load submodule keys
+        def safe_update(keys, submodule_name):
+            updated_dict = {}
+            for k in keys:
+                if k in state_dict:
+                    if sam_dict[k].shape == state_dict[k].shape:
+                        updated_dict[k] = state_dict[k]
+                    else:
+                        print(f"Skipping {submodule_name} key {k}: shape mismatch {state_dict[k].shape} vs {sam_dict[k].shape}")
+                else:
+                    print(f"Skipping {submodule_name} key {k}: not found in checkpoint")
+            return updated_dict
+
+        # 3. FacTu and FacTv
         FacTu_keys = [k for k in sam_keys if 'FacTu' in k]
-        FacTu_values = [state_dict[k] for k in FacTu_keys]
-        FacTu_new_state_dict = {k: v for k, v in zip(FacTu_keys, FacTu_values)}
-        sam_dict.update(FacTu_new_state_dict)
-
         FacTv_keys = [k for k in sam_keys if 'FacTv' in k]
-        FacTv_values = [state_dict[k] for k in FacTv_keys]
-        FacTv_new_state_dict = {k: v for k, v in zip(FacTv_keys, FacTv_values)}
-        sam_dict.update(FacTv_new_state_dict)
+        sam_dict.update(safe_update(FacTu_keys, "FacTu"))
+        sam_dict.update(safe_update(FacTv_keys, "FacTv"))
 
-        # load prompt encoder
-        prompt_encoder_keys = [k for k in sam_keys if 'prompt_encoder' in k]
-        prompt_encoder_values = [state_dict[k] for k in prompt_encoder_keys]
-        prompt_encoder_new_state_dict = {k: v for k, v in zip(prompt_encoder_keys, prompt_encoder_values)}
-        sam_dict.update(prompt_encoder_new_state_dict)
+        # 4. Prompt encoder
+        prompt_keys = [k for k in sam_keys if 'prompt_encoder' in k]
+        sam_dict.update(safe_update(prompt_keys, "prompt_encoder"))
 
-        # load mask decoder
-        mask_decoder_keys = [k for k in sam_keys if 'mask_decoder' in k]
-        mask_decoder_values = [state_dict[k] for k in mask_decoder_keys]
-        mask_decoder_new_state_dict = {k: v for k, v in zip(mask_decoder_keys, mask_decoder_values)}
-        sam_dict.update(mask_decoder_new_state_dict)
+        # 5. Mask decoder
+        mask_keys = [k for k in sam_keys if 'mask_decoder' in k]
+        sam_dict.update(safe_update(mask_keys, "mask_decoder"))
 
-        # load adapter
+        # 6. Adapter weights
         adapter_keys = [k for k in sam_keys if '.adapter_' in k]
-        adapter_values = [state_dict[k] for k in adapter_keys]
-        adapter_new_state_dict = {k: v for k, v in zip(adapter_keys, adapter_values)}
-        sam_dict.update(adapter_new_state_dict)
+        sam_dict.update(safe_update(adapter_keys, "adapter"))
 
+        # 7. Load into SAM
         self.sam.load_state_dict(sam_dict)
+
+
+    # def load_parameters(self, filename: str) -> None:
+    #     r"""Only safetensors is supported now.
+
+    #     pip install safetensor if you do not have one installed yet.\
+
+    #     load both FacT_tt and fc parameters.
+    #     """
+
+    #     assert filename.endswith(".pt") or filename.endswith('.pth')
+
+    #     state_dict = torch.load(filename)
+
+    #     for i, q_FacTs in enumerate(self.q_FacTs):
+    #         saved_key = f"q_FacTs_{i:03d}"
+    #         saved_tensor = state_dict[saved_key]
+    #         q_FacTs.weight = Parameter(saved_tensor)
+
+    #     for i, v_FacTs in enumerate(self.v_FacTs):
+    #         saved_key = f"v_FacTs_{i:03d}"
+    #         saved_tensor = state_dict[saved_key]
+    #         v_FacTs.weight = Parameter(saved_tensor)
+
+    #     sam_dict = self.sam.state_dict()
+    #     sam_keys = sam_dict.keys()
+
+    #     FacTu_keys = [k for k in sam_keys if 'FacTu' in k]
+    #     FacTu_values = [state_dict[k] for k in FacTu_keys]
+    #     FacTu_new_state_dict = {k: v for k, v in zip(FacTu_keys, FacTu_values)}
+    #     sam_dict.update(FacTu_new_state_dict)
+
+    #     FacTv_keys = [k for k in sam_keys if 'FacTv' in k]
+    #     FacTv_values = [state_dict[k] for k in FacTv_keys]
+    #     FacTv_new_state_dict = {k: v for k, v in zip(FacTv_keys, FacTv_values)}
+    #     sam_dict.update(FacTv_new_state_dict)
+
+    #     # load prompt encoder
+    #     prompt_encoder_keys = [k for k in sam_keys if 'prompt_encoder' in k]
+    #     prompt_encoder_values = [state_dict[k] for k in prompt_encoder_keys]
+    #     prompt_encoder_new_state_dict = {k: v for k, v in zip(prompt_encoder_keys, prompt_encoder_values)}
+    #     sam_dict.update(prompt_encoder_new_state_dict)
+
+    #     # load mask decoder
+    #     # mask_decoder_keys = [k for k in sam_keys if 'mask_decoder' in k]
+    #     # mask_decoder_values = [state_dict[k] for k in mask_decoder_keys]
+    #     # mask_decoder_new_state_dict = {k: v for k, v in zip(mask_decoder_keys, mask_decoder_values)}
+    #     # sam_dict.update(mask_decoder_new_state_dict)
+
+    #     # load mask decoder safely
+    #     mask_decoder_keys = [k for k in sam_keys if 'mask_decoder' in k]
+    #     mask_decoder_new_state_dict = {}
+    #     for k in mask_decoder_keys:
+    #         if k in state_dict:
+    #             mask_decoder_new_state_dict[k] = state_dict[k]
+    #         else:
+    #             print(f"Skipping missing checkpoint key: {k}")
+
+    #     sam_dict.update(mask_decoder_new_state_dict)
+
+    #     # load adapter
+    #     # adapter_keys = [k for k in sam_keys if '.adapter_' in k]
+    #     # adapter_values = [state_dict[k] for k in adapter_keys]
+    #     # adapter_new_state_dict = {k: v for k, v in zip(adapter_keys, adapter_values)}
+    #     # sam_dict.update(adapter_new_state_dict)
+
+    #     self.sam.load_state_dict(sam_dict)
 
     def reset_parameters(self) -> None:
         for w_A in self.w_As:
@@ -436,4 +516,3 @@ class Fact_tt_Sam(nn.Module):
 
     def forward(self, batched_input, multimask_output, image_size):
         return self.sam(batched_input, multimask_output, image_size)
-
