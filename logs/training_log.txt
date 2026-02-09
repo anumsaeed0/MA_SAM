@@ -1,0 +1,5 @@
+[11:18:30.863] Namespace(root_path='data_train/prostateD/2D_all_5slice/', output='output/', num_classes=12, batch_size=1, n_gpu=1, base_lr=0.0008, max_epochs=400, stop_epoch=300, deterministic=1, img_size=256, seed=1234, vit_name='vit_h', ckpt='sam_vit_h_4b8939.pth', adapt_ckpt=None, rank=32, scale=1.0, warmup=True, warmup_period=250, AdamW=True, module='sam_fact_tt_image_encoder', dice_param=0.8, lr_exp=7, tf32=True, compile=False, use_amp=True, skip_hard=True)
+[11:18:30.898] 3744 iterations per epoch. 1497600 max iterations 
+[11:18:32.712] iteration 1 : loss : 1.261724, loss_ce: 2.440067, loss_dice: 0.967138
+[11:18:33.788] iteration 2 : loss : 1.240524, loss_ce: 2.328410, loss_dice: 0.968552
+[11:18:34.436] iteration 3 : loss : 1.221730, loss_ce: 2.244462, loss_dice: 0.966047
