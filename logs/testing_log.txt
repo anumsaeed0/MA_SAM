@@ -1,0 +1,24 @@
+(masam) D:\Anum\MA-SAM\MA-SAM>python test.py --adapt_ckpt ../output/Final_model.pth --data_path ../data_train/prostateD/2D_all_5slice/ --ckpt ../sam_vit_h_4b8939.pth
+D:\Anum\MA-SAM\MA-SAM\segment_anything\build_sam.py:131: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(f)
+D:\Anum\MA-SAM\MA-SAM\sam_fact_tt_image_encoder.py:389: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state_dict = torch.load(filename)
+Namespace(adapt_ckpt='../output/Final_model.pth', data_path='../data_train/prostateD/2D_all_5slice/', num_classes=12, img_size=512, seed=1234, is_savenii=False, deterministic=1, ckpt='../sam_vit_h_4b8939.pth', vit_name='vit_h', rank=32, scale=1.0, module='sam_fact_tt_image_encoder', output_dir='../output/Final_model')
+  0%|                                                                                                                                                                                     | 0/3 [00:00<?, ?it/s]idx 1 case BIDMC_Case00 mean_dice 0.992559
+ 33%|█████████████████████████████████████████████████████████▋                                                                                                                   | 1/3 [00:26<00:53, 26.90s/it]idx 1 case BIDMC_Case02 mean_dice 0.961893
+ 67%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████▎                                                         | 2/3 [00:56<00:28, 28.68s/it]idx 1 case BIDMC_Case03 mean_dice 0.990682
+100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 3/3 [01:20<00:00, 26.76s/it]
+Mean class 1 name spleen mean_dice 0.780537
+Mean class 2 name right kidney mean_dice 1.000000
+Mean class 3 name left kidney mean_dice 1.000000
+Mean class 4 name gallbladder mean_dice 1.000000
+Mean class 5 name esophagus mean_dice 1.000000
+Mean class 6 name liver mean_dice 1.000000
+Mean class 7 name stomach mean_dice 1.000000
+Mean class 8 name aorta mean_dice 1.000000
+Mean class 9 name vena mean_dice 1.000000
+Mean class 10 name vein mean_dice 1.000000
+Mean class 11 name pancreas mean_dice 1.000000
+Mean class 12 name adrenal gland mean_dice 1.000000
+Testing performance in best val model: mean_dice : 0.981711
+Testing Finished!
