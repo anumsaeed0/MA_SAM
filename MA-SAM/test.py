@@ -1,252 +1,522 @@
-import os
-import sys
-from tqdm import tqdm
-import logging
-import numpy as np
-import argparse
-import random
-import numpy as np
-import torch
-from torch.utils.data import DataLoader
-import torch.backends.cudnn as cudnn
-from importlib import import_module
+from fileinput import filename
+
+from segment_anything import build_sam, SamPredictor
 from segment_anything import sam_model_registry
 
-from icecream import ic
-import pandas as pd
-import pickle
-from datetime import datetime
-from einops import repeat
-from scipy.ndimage import zoom
-from utils import calculate_metric_percase
-import nibabel as nib
+import math
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch import Tensor, device
+from torch.nn.parameter import Parameter
+from segment_anything.modeling import Sam
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print("Using device:", device)
+from typing import Optional, Tuple, Type
 
-HU_min, HU_max = -200, 250
-data_mean = 50.21997497685108
-data_std = 68.47153712416372
+def window_partition(x: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, Tuple[int, int]]:
+    """
+    Partition into non-overlapping windows with padding if needed.
+    Args:
+        x (tensor): input tokens with [B, H, W, C].
+        window_size (int): window size.
 
-def test_single_volume(image, label, net, classes, multimask_output, patch_size=[512, 512], test_save_path=None, case=None, device=None):
-    
-    image, label = image.squeeze(0), label.squeeze(0) #[b, h, w, d], [b, h, w, d]
-    label = label[:,:,:,2]
-    
-    probability = np.expand_dims(np.zeros_like(label, dtype=np.float32), axis=-1) #[b, h, w, c]
-    probability = repeat(probability, 'd h w c -> d h w (repeat c)', repeat=classes+1)
+    Returns:
+        windows: windows after partition with [B * num_windows, window_size, window_size, C].
+        (Hp, Wp): padded height and width before partition
+    """
+    B, H, W, C = x.shape
 
-    probability = np.concatenate((probability[0:1], probability[0:1], probability, probability[-1:], probability[-1:]), axis=0)
+    pad_h = (window_size - H % window_size) % window_size
+    pad_w = (window_size - W % window_size) % window_size
+    if pad_h > 0 or pad_w > 0:
+        x = F.pad(x, (0, 0, 0, pad_w, 0, pad_h))
+    Hp, Wp = H + pad_h, W + pad_w
 
-    avg_cnt = np.ones_like(probability, dtype=np.float32)
-    for ind in range(image.shape[0]):
-        slice = image[ind]
-        x, y = slice.shape[0], slice.shape[1]
-        if x != patch_size[0] or y != patch_size[1]:
-            slice = zoom(slice, (patch_size[0] / x, patch_size[1] / y), order=3)
-        
-        # inputs = torch.from_numpy(slice).unsqueeze(0).unsqueeze(0).float().cuda()
-        inputs = torch.from_numpy(slice).unsqueeze(0).unsqueeze(0).float().to(device)
-
-        inputs = repeat(inputs, 'b c h w d -> b (repeat c) h w d', repeat=3)
-        inputs = torch.permute(inputs, (0, -1, 1, 2, 3))
-        net.eval()
-        with torch.no_grad():
-            outputs = net(inputs, multimask_output, patch_size[0])
-            output_masks = outputs['masks']
-            
-            out = torch.argmax(torch.softmax(output_masks, dim=1), dim=1)
-            out = out.cpu().detach().numpy()
-            out_pred = torch.softmax(output_masks, dim=1)
-            out_pred = torch.permute(out_pred, (0, 2, 3, 1))
-            out_pred = out_pred.cpu().detach().numpy()
-            out_h, out_w = out.shape[1], out.shape[2]
-            if x != out_h or y != out_w:
-                out_pred = zoom(out_pred, (1.0, x / out_h, y / out_w, 1.0), order=3)
-            
-            probability[ind: ind+5] += out_pred
-            avg_cnt[ind: ind+5] += 1.
-            
-    probability = probability/avg_cnt
-    prediction = np.argmax(probability, axis=-1)
-    prediction = prediction[2:-2]
-
-    metric_list = []
-    for i in range(1, classes + 1):
-        metric_list.append(calculate_metric_percase(prediction == i, label == i))
-
-    if test_save_path is not None:
-        
-        image_data = np.moveaxis(image[:,:,:,2].astype(np.float32), 0, -1)
-        prediction_data = np.moveaxis(prediction.astype(np.float32), 0, -1)
-        label_data = np.moveaxis(label.astype(np.float32), 0, -1)
-
-        image_data = np.rot90(np.flip(image_data, axis=1), k=-1, axes=(0, 1))
-        prediction_data = np.rot90(np.flip(prediction_data, axis=1), k=-1, axes=(0, 1))
-        label_data = np.rot90(np.flip(label_data, axis=1), k=-1, axes=(0, 1))
-
-        # Create Nifti images
-        img_nifti = nib.Nifti1Image(image_data, np.eye(4))
-        prd_nifti = nib.Nifti1Image(prediction_data, np.eye(4))
-        lab_nifti = nib.Nifti1Image(label_data, np.eye(4))
-
-        # Set spacing
-        img_nifti.header['pixdim'][1:4] = [1, 1, 1]
-        prd_nifti.header['pixdim'][1:4] = [1, 1, 1]
-        lab_nifti.header['pixdim'][1:4] = [1, 1, 1]
-
-        # Save the images
-        img_nifti.to_filename(f"{test_save_path}/{case}_img.nii.gz")
-        prd_nifti.to_filename(f"{test_save_path}/{case}_pred.nii.gz")
-        lab_nifti.to_filename(f"{test_save_path}/{case}_gt.nii.gz")
-        
-    return metric_list
-
-def inference(args, multimask_output, model, test_save_path=None, device=None):
-    data_fd_list = pd.read_csv(args.data_path+'/test.csv')
-    data_fd_list = data_fd_list["image_pth"]
-    data_fd_list = [data_fd.split("/")[-3] for data_fd in data_fd_list]
-    data_fd_list = list(set(data_fd_list))
-    data_fd_list.sort()
-    
-    model.eval()
-    metric_list = []
-    for data_fd in tqdm(data_fd_list):
-        image_file_list = os.listdir(args.data_path+'/'+data_fd + '/images')
-        image_file_list.sort()
-        image_arr_list = []
-        mask_arr_list = []
-        for image_file in image_file_list:
-            with open(args.data_path+'/'+data_fd + '/images/'+image_file, 'rb') as file:
-                image_arr = pickle.load(file)
-            with open(args.data_path+'/'+data_fd + '/masks/'+image_file.replace("2Dimage", "2Dmask"), 'rb') as file:
-                mask_arr = pickle.load(file)
-
-            image_arr = np.clip(image_arr, HU_min, HU_max)
-            image_arr = (image_arr-HU_min)/(HU_max-HU_min)*255.0
-            image_arr = np.float32(image_arr)
-            image_arr = (image_arr - data_mean) / data_std
-            image_arr = (image_arr-image_arr.min())/(image_arr.max()-image_arr.min()+0.00000001)
-
-            mask_arr = np.float32(mask_arr)
-            if args.num_classes==12:
-                mask_arr[mask_arr==13] = 12
-                class_to_name = {1: 'spleen', 2: 'right kidney', 3: 'left kidney', 4: 'gallbladder', 5:'esophagus', 6: 'liver', 7: 'stomach', 8: 'aorta', 9:'vena', 10:'vein', 11: 'pancreas', 12:'adrenal gland'}
-            
-            image_arr_list.append(image_arr)
-            mask_arr_list.append(mask_arr)
-
-        image = np.expand_dims(np.stack(image_arr_list), axis=0) 
-        label = np.expand_dims(np.stack(mask_arr_list), axis=0)
-        case_name = data_fd
-
-        h, w = image.shape[2], image.shape[3]
-
-        metric_i = test_single_volume(image, label, model, classes=args.num_classes, multimask_output=multimask_output,
-                                        patch_size=[args.img_size, args.img_size],
-                                        test_save_path=test_save_path, case=case_name, device=device)
-        
-        metric_list.append(np.array(metric_i))
-        logging.info('idx %d case %s mean_dice %f' % (
-            1, case_name, np.nanmean(metric_i, axis=0)))
-    
-    metric_list = np.nanmean(metric_list, axis=0)
-    for i in range(1, args.num_classes + 1):
-        logging.info('Mean class %d name %s mean_dice %f' % (i, class_to_name[i], metric_list[i - 1]))
-
-    performance = np.nanmean(metric_list, axis=0)
-    
-    logging.info('Testing performance in best val model: mean_dice : %f ' % (performance))
-    logging.info("Testing Finished!")
-    return 1
+    x = x.view(B, Hp // window_size, window_size, Wp // window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+    return windows, (Hp, Wp)
 
 
-def config_to_dict(config):
-    items_dict = {}
-    with open(config, 'r') as f:
-        items = f.readlines()
-    for i in range(len(items)):
-        key, value = items[i].strip().split(': ')
-        items_dict[key] = value
-    return items_dict
+def window_unpartition(
+    windows: torch.Tensor, window_size: int, pad_hw: Tuple[int, int], hw: Tuple[int, int]
+) -> torch.Tensor:
+    """
+    Window unpartition into original sequences and removing padding.
+    Args:
+        x (tensor): input tokens with [B * num_windows, window_size, window_size, C].
+        window_size (int): window size.
+        pad_hw (Tuple): padded height and width (Hp, Wp).
+        hw (Tuple): original height and width (H, W) before padding.
 
+    Returns:
+        x: unpartitioned sequences with [B, H, W, C].
+    """
+    Hp, Wp = pad_hw
+    H, W = hw
+    B = windows.shape[0] // (Hp * Wp // window_size // window_size)
+    x = windows.view(B, Hp // window_size, Wp // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, Hp, Wp, -1)
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--adapt_ckpt', type=str, default='/mnt/weka/wekafs/rad-megtron/cchen/project_results/MA_SAM/results-1/epoch_159.pth', help='The checkpoint after adaptation')
-    parser.add_argument('--data_path', type=str, default='/mnt/weka/wekafs/rad-megtron/cchen/synapseCT/Training/2D_all_5slice')
-    
-    parser.add_argument('--num_classes', type=int, default=12)
-    parser.add_argument('--img_size', type=int, default=512, help='Input image size of the network')
-    
-    parser.add_argument('--seed', type=int, default=1234, help='random seed')
-    parser.add_argument('--is_savenii', action='store_true', help='Whether to save results during inference')
-    parser.add_argument('--deterministic', type=int, default=1, help='whether use deterministic training')
-    parser.add_argument('--ckpt', type=str, default='/mnt/weka/wekafs/rad-megtron/cchen/PretrainedModel/sam_vit_h_4b8939.pth', help='Pretrained checkpoint')
-    parser.add_argument('--vit_name', type=str, default='vit_h', help='Select one vit model')
-    parser.add_argument('--rank', type=int, default=32, help='Rank for FacT adaptation')
-    parser.add_argument('--scale', type=float, default=1.0)
-    parser.add_argument('--module', type=str, default='sam_fact_tt_image_encoder')
+    if Hp > H or Wp > W:
+        x = x[:, :H, :W, :].contiguous()
+    return x
 
-    args = parser.parse_args()
+def get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor) -> torch.Tensor:
+    """
+    Get relative positional embeddings according to the relative positions of
+        query and key sizes.
+    Args:
+        q_size (int): size of query q.
+        k_size (int): size of key k.
+        rel_pos (Tensor): relative position embeddings (L, C).
 
-    if not args.deterministic:
-        cudnn.benchmark = True
-        cudnn.deterministic = False
+    Returns:
+        Extracted positional embeddings according to relative positions.
+    """
+    max_rel_dist = int(2 * max(q_size, k_size) - 1)
+    # Interpolate rel pos if needed.
+    if rel_pos.shape[0] != max_rel_dist:
+        # Interpolate rel pos.
+        rel_pos_resized = F.interpolate(
+            rel_pos.reshape(1, rel_pos.shape[0], -1).permute(0, 2, 1),
+            size=max_rel_dist,
+            mode="linear",
+        )
+        rel_pos_resized = rel_pos_resized.reshape(-1, max_rel_dist).permute(1, 0)
     else:
-        cudnn.benchmark = False
-        cudnn.deterministic = True
-    random.seed(args.seed)
-    np.random.seed(args.seed)
-    torch.manual_seed(args.seed)
-    # torch.cuda.manual_seed(args.seed)
+        rel_pos_resized = rel_pos
 
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(args.seed)
+    # Scale the coords with short length if shapes for q and k are different.
+    q_coords = torch.arange(q_size)[:, None] * max(k_size / q_size, 1.0)
+    k_coords = torch.arange(k_size)[None, :] * max(q_size / k_size, 1.0)
+    relative_coords = (q_coords - k_coords) + (k_size - 1) * max(q_size / k_size, 1.0)
+
+    return rel_pos_resized[relative_coords.long()]
+
+def add_decomposed_rel_pos(
+    attn: torch.Tensor,
+    q: torch.Tensor,
+    rel_pos_h: torch.Tensor,
+    rel_pos_w: torch.Tensor,
+    q_size: Tuple[int, int],
+    k_size: Tuple[int, int],
+) -> torch.Tensor:
+    """
+    Calculate decomposed Relative Positional Embeddings from :paper:`mvitv2`.
+    https://github.com/facebookresearch/mvit/blob/19786631e330df9f3622e5402b4a419a263a2c80/mvit/models/attention.py   # noqa B950
+    Args:
+        attn (Tensor): attention map.
+        q (Tensor): query q in the attention layer with shape (B, q_h * q_w, C).
+        rel_pos_h (Tensor): relative position embeddings (Lh, C) for height axis.
+        rel_pos_w (Tensor): relative position embeddings (Lw, C) for width axis.
+        q_size (Tuple): spatial sequence size of query q with (q_h, q_w).
+        k_size (Tuple): spatial sequence size of key k with (k_h, k_w).
+
+    Returns:
+        attn (Tensor): attention map with added relative positional embeddings.
+    """
+    q_h, q_w = q_size
+    k_h, k_w = k_size
+    Rh = get_rel_pos(q_h, k_h, rel_pos_h)
+    Rw = get_rel_pos(q_w, k_w, rel_pos_w)
+
+    B, _, dim = q.shape
+    r_q = q.reshape(B, q_h, q_w, dim)
+    rel_h = torch.einsum("bhwc,hkc->bhwk", r_q, Rh)
+    rel_w = torch.einsum("bhwc,wkc->bhwk", r_q, Rw)
+
+    attn = (
+        attn.view(B, q_h, q_w, k_h, k_w) + rel_h[:, :, :, :, None] + rel_w[:, :, :, None, :]
+    ).view(B, q_h * q_w, k_h * k_w)
+
+    return attn
+
+class _Fact_tt_ImageEncoderViT(nn.Module):
+    def __init__(
+            self,
+            ImageEncoderViT: nn.Module,
+            FacTu: nn.Module,
+            FacTv: nn.Module,
+    ):
+        super().__init__()
+        self.ImageEncoderViT = ImageEncoderViT
+        self.FacTu = FacTu
+        self.FacTv = FacTv
+        self.img_size = self.ImageEncoderViT.img_size
+
     
-    args.output_dir = args.adapt_ckpt[:-4]
-    if not os.path.exists(args.output_dir):
-        os.mkdir(args.output_dir)
+    def forward(self, x: torch.Tensor, d_size) -> torch.Tensor:
+        x = self.ImageEncoderViT.patch_embed(x)  
+        if self.ImageEncoderViT.pos_embed is not None:
+            x = x + self.ImageEncoderViT.pos_embed
 
-    # register model
-    sam, img_embedding_size = sam_model_registry[args.vit_name](image_size=args.img_size,
-                                                                    num_classes=args.num_classes,
-                                                                    checkpoint=args.ckpt, pixel_mean=[0., 0., 0.],
-                                                                pixel_std=[1., 1., 1.])
+        for blk in self.ImageEncoderViT.blocks:
+            x = blk(x, self.FacTu, self.FacTv, d_size)
+
+        x = self.ImageEncoderViT.neck(x.permute(0, 3, 1, 2))  
+
+        return x
+
+class _Fact_tt_Block(nn.Module):
+    def __init__(
+            self,
+            Block: nn.Module,
+    ):
+        super().__init__()
+        self.Block = Block
+        
     
-    pkg = import_module(args.module)
-    # net = pkg.Fact_tt_Sam(sam, args.rank, s=args.scale).cuda()
-    net = pkg.Fact_tt_Sam(sam, args.rank, s=args.scale).to(device)
+    def forward(self, x: torch.Tensor, FacTu, FacTv, d_size) -> torch.Tensor:
 
-    assert args.adapt_ckpt is not None
-    net.load_parameters(args.adapt_ckpt)
+        b_size, hw_size = x.shape[0], x.shape[1]
 
-    if args.num_classes > 1:
-        multimask_output = True
-    else:
-        multimask_output = False
+        # 3D adapter
+        shortcut = x
+        x = self.Block.adapter_norm(x)
+        x = self.Block.adapter_linear_down(x)
+        x = x.contiguous().view(int(b_size/d_size), d_size, hw_size, hw_size, self.Block.adapter_channels)
+        x = torch.permute(x, (0, -1, 1, 2, 3))
+        x = self.Block.adapter_conv(x)
+        x = torch.permute(x, (0, 2, 3, 4, 1))
+        x = x.contiguous().view(b_size, hw_size, hw_size, self.Block.adapter_channels)
+        x = self.Block.adapter_act(x)
+        x = self.Block.adapter_linear_up(x)
+        x = shortcut + x
+        # end 3D adapter
 
-    # initialize log
-    log_folder = os.path.join(args.output_dir, 'test_log')
-    os.makedirs(log_folder, exist_ok=True)
+        shortcut = x
+        x = self.Block.norm1(x)
+        # Window partition
+        if self.Block.window_size > 0:
+            H, W = x.shape[1], x.shape[2]
+            x, pad_hw = window_partition(x, self.Block.window_size)  # [B * num_windows, window_size, window_size, C]
+
+        x = self.Block.attn(x, FacTu, FacTv)
+        # Reverse window partition
+        if self.Block.window_size > 0:
+            x = window_unpartition(x, self.Block.window_size, pad_hw, (H, W))
+
+        x = shortcut + x
+
+        # 3D adapter
+        shortcut = x
+        x = self.Block.adapter_norm_2(x)
+        x = self.Block.adapter_linear_down_2(x)
+        x = x.contiguous().view(int(b_size/d_size), d_size, hw_size, hw_size, self.Block.adapter_channels)
+        x = torch.permute(x, (0, -1, 1, 2, 3))
+        x = self.Block.adapter_conv_2(x)
+        x = torch.permute(x, (0, 2, 3, 4, 1))
+        x = x.contiguous().view(b_size, hw_size, hw_size, self.Block.adapter_channels)
+        x = self.Block.adapter_act_2(x)
+        x = self.Block.adapter_linear_up_2(x)
+        x = shortcut + x
+        # end 3D adapter
+
+        x = x + self.Block.mlp(self.Block.norm2(x))
+
+        return x
+
+class _Fact_tt_Attention(nn.Module):
+    def __init__(
+            self,
+            Attention: nn.Module,
+    ):
+        super().__init__()
+        self.Attention = Attention
     
-    if not os.path.exists('./testing_log'):
-        os.mkdir('./testing_log')
-    ckpt_name = os.path.splitext(os.path.basename(args.adapt_ckpt))[0]
-    logging.basicConfig(
-        filename=f'./testing_log/{ckpt_name}_log.txt',
-        level=logging.INFO,
-        format='[%(asctime)s.%(msecs)03d] %(message)s',
-        datefmt='%H:%M:%S'
-    )
+    def forward(self, x: torch.Tensor, FacTu, FacTv) -> torch.Tensor:
+        B, H, W, _ = x.shape
+        # qkv with shape (3, B, nHead, H * W, C)
+        qkv = self.Attention.qkv(x, FacTu, FacTv).reshape(B, H * W, 3, self.Attention.num_heads, -1).permute(2, 0, 3, 1, 4)
+        # q, k, v with shape (B * nHead, H * W, C)
+        q, k, v = qkv.reshape(3, B * self.Attention.num_heads, H * W, -1).unbind(0)
 
-    # logging.basicConfig(filename= './testing_log/' + args.adapt_ckpt.split('/')[-3] + '_log.txt', level=logging.INFO,
-    #                     format='[%(asctime)s.%(msecs)03d] %(message)s', datefmt='%H:%M:%S')
-    logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
-    logging.info(str(args))
+        attn = (q * self.Attention.scale) @ k.transpose(-2, -1)
 
-    if args.is_savenii:
-        test_save_path = args.output_dir
-    else:
-        test_save_path = None
-    inference(args, multimask_output, net, test_save_path, device)
+        if self.Attention.use_rel_pos:
+            attn = add_decomposed_rel_pos(attn, q, self.Attention.rel_pos_h, self.Attention.rel_pos_w, (H, W), (H, W))
+
+        attn = attn.softmax(dim=-1)
+        x = (attn @ v).view(B, self.Attention.num_heads, H, W, -1).permute(0, 2, 3, 1, 4).reshape(B, H, W, -1)
+        x = self.Attention.proj(x)
+
+        return x
+
+class _Fact_tt_qkv(nn.Module):
+    """In Sam it is implemented as
+    self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+    B, N, C = x.shape
+    qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, self.head_dim).permute(2, 0, 3, 1, 4)
+    q, k, v = qkv.unbind(0)
+    """
+
+    def __init__(
+            self,
+            qkv: nn.Module,
+            q_FacTs: nn.Module,
+            v_FacTs: nn.Module,
+            s,
+    ):
+        super().__init__()
+        self.qkv = qkv
+        self.q_FacTs = q_FacTs
+        self.v_FacTs = v_FacTs
+        self.dim = qkv.in_features
+        self.w_identity = torch.eye(qkv.in_features)
+        self.dp_q = nn.Dropout(0.1)
+        self.dp_v = nn.Dropout(0.1)
+        self.s = s
+
+    def forward(self, x, FacTu, FacTv):
+        qkv = self.qkv(x)  # B,N,N,3*org_C
+        new_q = FacTv(self.dp_q(self.q_FacTs(FacTu(x))))  
+        new_v = FacTv(self.dp_v(self.v_FacTs(FacTu(x))))
+        qkv[:, :, :, : self.dim] += new_q*self.s
+        qkv[:, :, :, -self.dim:] += new_v*self.s
+        return qkv
+
+class Fact_tt_Sam(nn.Module):
+    """Applies low-rank adaptation to a Sam model's image encoder.
+
+    Args:
+        sam_model: a vision transformer model, see base_vit.py
+        r: rank of FacT_tt
+        num_classes: how many classes the model output, default to the vit model
+        FacT_tt_layer: which layer we apply FacT_tt.
+
+    """
+
+    def __init__(self, sam_model: Sam, r: int, fact_layer=None, s=1):  # s是尺度系数
+        super(Fact_tt_Sam, self).__init__()
+
+        assert r > 0
+        base_vit_dim = sam_model.image_encoder.patch_embed.proj.out_channels
+        
+        # dim = base_vit_dim
+        if fact_layer:
+            self.fact_layer = fact_layer
+        else:
+            self.fact_layer = list(
+                range(len(sam_model.image_encoder.blocks)))  
+        # create for storage, then we can init them or load weights
+        self.q_FacTs = []  # These are linear layers
+        self.v_FacTs = []
+
+        self.FacTu = nn.Linear(base_vit_dim, r, bias=False)
+        self.FacTv = nn.Linear(r, base_vit_dim, bias=False)
+        nn.init.zeros_(self.FacTv.weight)
+
+        # lets freeze pre-trained weights
+        for k, v in sam_model.image_encoder.named_parameters():
+            if not '.adapter_' in k:
+                v.requires_grad = False
+
+        # add factors
+        for t_layer_i, blk in enumerate(sam_model.image_encoder.blocks):
+            if t_layer_i not in self.fact_layer:
+                continue
+            w_qkv_linear = blk.attn.qkv
+            self.dim = w_qkv_linear.in_features
+            q_FacTs = nn.Linear(r, r, bias=False)
+            v_FacTs = nn.Linear(r, r, bias=False)
+            self.q_FacTs.append(q_FacTs)
+            self.v_FacTs.append(v_FacTs)
+            blk.attn.qkv = _Fact_tt_qkv(
+                w_qkv_linear,
+                q_FacTs,
+                v_FacTs,
+                s
+            )
+
+            blk.attn = _Fact_tt_Attention(blk.attn)  
+            sam_model.image_encoder.blocks[t_layer_i] = _Fact_tt_Block(blk)  
+        
+        sam_model.image_encoder = _Fact_tt_ImageEncoderViT(sam_model.image_encoder, self.FacTu, self.FacTv)
+        self.sam = sam_model
+
+    def save_parameters(self, filename: str) -> None:
+        r"""Only safetensors is supported now.
+
+        pip install safetensor if you do not have one installed yet.
+
+        save both FacT_tt and fc parameters.
+        """
+
+        assert filename.endswith(".pt") or filename.endswith('.pth')
+
+        num_layer = len(self.q_FacTs)  # actually, it is half
+        a_tensors = {f"q_FacTs_{i:03d}": self.q_FacTs[i].weight for i in range(num_layer)}
+        b_tensors = {f"v_FacTs_{i:03d}": self.v_FacTs[i].weight for i in range(num_layer)}
+
+        prompt_encoder_tensors = {}
+        mask_decoder_tensors = {}
+        adapter_tensor = {}
+
+        FacTu_tensors = {}
+        FacTv_tensors = {}
+
+        # save prompt encoder, only `state_dict`, the `named_parameter` is not permitted
+        if isinstance(self.sam, torch.nn.DataParallel) or isinstance(self.sam, torch.nn.parallel.DistributedDataParallel):
+            state_dict = self.sam.module.state_dict()
+        else:
+            state_dict = self.sam.state_dict()
+        for key, value in state_dict.items():
+            if 'prompt_encoder' in key:
+                prompt_encoder_tensors[key] = value
+            if 'mask_decoder' in key:
+                mask_decoder_tensors[key] = value
+            if '.adapter_' in key:
+                adapter_tensor[key] = value
+            if 'FacTu' in key:
+                FacTu_tensors[key] = value
+            if 'FacTv' in key:
+                FacTv_tensors[key] = value
+
+        merged_dict = {**a_tensors, **b_tensors, **FacTu_tensors, **FacTv_tensors, **prompt_encoder_tensors, **mask_decoder_tensors, **adapter_tensor}
+        torch.save(merged_dict, filename)
+    
+    def load_parameters(self, filename: str) -> None:
+        r"""
+        Safely load checkpoint parameters for FacT_tt Sam model.
+
+        Supports:
+            - q_FacTs / v_FacTs
+            - FacTu / FacTv
+            - prompt_encoder
+            - mask_decoder (skips missing/mismatched keys)
+            - adapter weights (skips missing/mismatched keys)
+        """
+        assert filename.endswith(".pt") or filename.endswith(".pth")
+
+        # state_dict = torch.load(filename)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        state_dict = torch.load(filename, map_location=device)
+
+        # 1. Load q_FacTs and v_FacTs
+        for i, q_FacTs in enumerate(self.q_FacTs):
+            key = f"q_FacTs_{i:03d}"
+            if key in state_dict:
+                q_FacTs.weight = nn.Parameter(state_dict[key])
+            else:
+                print(f"Skipping missing checkpoint key: {key}")
+
+        for i, v_FacTs in enumerate(self.v_FacTs):
+            key = f"v_FacTs_{i:03d}"
+            if key in state_dict:
+                v_FacTs.weight = nn.Parameter(state_dict[key])
+            else:
+                print(f"Skipping missing checkpoint key: {key}")
+
+        # 2. Load SAM model state dict
+        sam_dict = self.sam.state_dict()
+        sam_keys = list(sam_dict.keys())
+
+        # Helper function to safely load submodule keys
+        def safe_update(keys, submodule_name):
+            updated_dict = {}
+            for k in keys:
+                if k in state_dict:
+                    if sam_dict[k].shape == state_dict[k].shape:
+                        updated_dict[k] = state_dict[k]
+                    else:
+                        print(f"Skipping {submodule_name} key {k}: shape mismatch {state_dict[k].shape} vs {sam_dict[k].shape}")
+                else:
+                    print(f"Skipping {submodule_name} key {k}: not found in checkpoint")
+            return updated_dict
+
+        # 3. FacTu and FacTv
+        FacTu_keys = [k for k in sam_keys if 'FacTu' in k]
+        FacTv_keys = [k for k in sam_keys if 'FacTv' in k]
+        sam_dict.update(safe_update(FacTu_keys, "FacTu"))
+        sam_dict.update(safe_update(FacTv_keys, "FacTv"))
+
+        # 4. Prompt encoder
+        prompt_keys = [k for k in sam_keys if 'prompt_encoder' in k]
+        sam_dict.update(safe_update(prompt_keys, "prompt_encoder"))
+
+        # 5. Mask decoder
+        mask_keys = [k for k in sam_keys if 'mask_decoder' in k]
+        sam_dict.update(safe_update(mask_keys, "mask_decoder"))
+
+        # 6. Adapter weights
+        adapter_keys = [k for k in sam_keys if '.adapter_' in k]
+        sam_dict.update(safe_update(adapter_keys, "adapter"))
+
+        # 7. Load into SAM
+        self.sam.load_state_dict(sam_dict)
+
+
+    # def load_parameters(self, filename: str) -> None:
+    #     r"""Only safetensors is supported now.
+
+    #     pip install safetensor if you do not have one installed yet.\
+
+    #     load both FacT_tt and fc parameters.
+    #     """
+
+    #     assert filename.endswith(".pt") or filename.endswith('.pth')
+
+    #     state_dict = torch.load(filename)
+
+    #     for i, q_FacTs in enumerate(self.q_FacTs):
+    #         saved_key = f"q_FacTs_{i:03d}"
+    #         saved_tensor = state_dict[saved_key]
+    #         q_FacTs.weight = Parameter(saved_tensor)
+
+    #     for i, v_FacTs in enumerate(self.v_FacTs):
+    #         saved_key = f"v_FacTs_{i:03d}"
+    #         saved_tensor = state_dict[saved_key]
+    #         v_FacTs.weight = Parameter(saved_tensor)
+
+    #     sam_dict = self.sam.state_dict()
+    #     sam_keys = sam_dict.keys()
+
+    #     FacTu_keys = [k for k in sam_keys if 'FacTu' in k]
+    #     FacTu_values = [state_dict[k] for k in FacTu_keys]
+    #     FacTu_new_state_dict = {k: v for k, v in zip(FacTu_keys, FacTu_values)}
+    #     sam_dict.update(FacTu_new_state_dict)
+
+    #     FacTv_keys = [k for k in sam_keys if 'FacTv' in k]
+    #     FacTv_values = [state_dict[k] for k in FacTv_keys]
+    #     FacTv_new_state_dict = {k: v for k, v in zip(FacTv_keys, FacTv_values)}
+    #     sam_dict.update(FacTv_new_state_dict)
+
+    #     # load prompt encoder
+    #     prompt_encoder_keys = [k for k in sam_keys if 'prompt_encoder' in k]
+    #     prompt_encoder_values = [state_dict[k] for k in prompt_encoder_keys]
+    #     prompt_encoder_new_state_dict = {k: v for k, v in zip(prompt_encoder_keys, prompt_encoder_values)}
+    #     sam_dict.update(prompt_encoder_new_state_dict)
+
+    #     # load mask decoder
+    #     # mask_decoder_keys = [k for k in sam_keys if 'mask_decoder' in k]
+    #     # mask_decoder_values = [state_dict[k] for k in mask_decoder_keys]
+    #     # mask_decoder_new_state_dict = {k: v for k, v in zip(mask_decoder_keys, mask_decoder_values)}
+    #     # sam_dict.update(mask_decoder_new_state_dict)
+
+    #     # load mask decoder safely
+    #     mask_decoder_keys = [k for k in sam_keys if 'mask_decoder' in k]
+    #     mask_decoder_new_state_dict = {}
+    #     for k in mask_decoder_keys:
+    #         if k in state_dict:
+    #             mask_decoder_new_state_dict[k] = state_dict[k]
+    #         else:
+    #             print(f"Skipping missing checkpoint key: {k}")
+
+    #     sam_dict.update(mask_decoder_new_state_dict)
+
+    #     # load adapter
+    #     # adapter_keys = [k for k in sam_keys if '.adapter_' in k]
+    #     # adapter_values = [state_dict[k] for k in adapter_keys]
+    #     # adapter_new_state_dict = {k: v for k, v in zip(adapter_keys, adapter_values)}
+    #     # sam_dict.update(adapter_new_state_dict)
+
+    #     self.sam.load_state_dict(sam_dict)
+
+    def reset_parameters(self) -> None:
+        for w_A in self.w_As:
+            nn.init.kaiming_uniform_(w_A.weight, a=math.sqrt(5))
+        for w_B in self.w_Bs:
+            nn.init.zeros_(w_B.weight)
+
+    def forward(self, batched_input, multimask_output, image_size):
+        return self.sam(batched_input, multimask_output, image_size)
