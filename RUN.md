@@ -6,6 +6,7 @@ This guide provides step-by-step instructions for installation, dataset preparat
 
 ## 1. Installation
 
+### OPTION 01: Clone and Install Dependencies
 Clone the repository, set up the Conda environment, and install dependencies:
 
 ```bash
@@ -22,6 +23,36 @@ conda install pytorch torchvision torchaudio pytorch-cuda=11.7 -c pytorch -c nvi
 
 # Install Python dependencies
 pip install -r requirements.txt
+```
+
+### OPTION 02: Environment Setup (CPU / GPU Options)
+
+You can set up the environment using the provided YAML configuration files depending on your hardware:
+
+* **CPU Environment**
+
+  ```bash
+  environment_CPU.yml
+  ```
+
+* **GPU Environment**
+
+  ```bash
+  environment_GPU.yml
+  ```
+
+Install the environment using:
+
+```bash
+conda env create -f environment_CPU.yml
+```
+
+(or replace with the desired YAML file).
+
+After installation, activate the environment:
+
+```bash
+conda activate masam
 ```
 
 ---
