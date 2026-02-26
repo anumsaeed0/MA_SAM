@@ -21,11 +21,14 @@ from scipy.ndimage import zoom
 from utils import calculate_metric_percase
 import nibabel as nib
 
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("Using device:", device)
+
 HU_min, HU_max = -200, 250
 data_mean = 50.21997497685108
 data_std = 68.47153712416372
 
-def test_single_volume(image, label, net, classes, multimask_output, patch_size=[512, 512], test_save_path=None, case=None):
+def test_single_volume(image, label, net, classes, multimask_output, patch_size=[512, 512], test_save_path=None, case=None, device=None):
     
     image, label = image.squeeze(0), label.squeeze(0) #[b, h, w, d], [b, h, w, d]
     label = label[:,:,:,2]
@@ -42,7 +45,9 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
         if x != patch_size[0] or y != patch_size[1]:
             slice = zoom(slice, (patch_size[0] / x, patch_size[1] / y), order=3)
         
-        inputs = torch.from_numpy(slice).unsqueeze(0).unsqueeze(0).float().cuda()
+        # inputs = torch.from_numpy(slice).unsqueeze(0).unsqueeze(0).float().cuda()
+        inputs = torch.from_numpy(slice).unsqueeze(0).unsqueeze(0).float().to(device)
+
         inputs = repeat(inputs, 'b c h w d -> b (repeat c) h w d', repeat=3)
         inputs = torch.permute(inputs, (0, -1, 1, 2, 3))
         net.eval()
@@ -97,7 +102,7 @@ def test_single_volume(image, label, net, classes, multimask_output, patch_size=
         
     return metric_list
 
-def inference(args, multimask_output, model, test_save_path=None):
+def inference(args, multimask_output, model, test_save_path=None, device=None):
     data_fd_list = pd.read_csv(args.data_path+'/test.csv')
     data_fd_list = data_fd_list["image_pth"]
     data_fd_list = [data_fd.split("/")[-3] for data_fd in data_fd_list]
@@ -139,7 +144,7 @@ def inference(args, multimask_output, model, test_save_path=None):
 
         metric_i = test_single_volume(image, label, model, classes=args.num_classes, multimask_output=multimask_output,
                                         patch_size=[args.img_size, args.img_size],
-                                        test_save_path=test_save_path, case=case_name)
+                                        test_save_path=test_save_path, case=case_name, device=device)
         
         metric_list.append(np.array(metric_i))
         logging.info('idx %d case %s mean_dice %f' % (
@@ -194,7 +199,10 @@ if __name__ == '__main__':
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
-    torch.cuda.manual_seed(args.seed)
+    # torch.cuda.manual_seed(args.seed)
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
     
     args.output_dir = args.adapt_ckpt[:-4]
     if not os.path.exists(args.output_dir):
@@ -207,7 +215,8 @@ if __name__ == '__main__':
                                                                 pixel_std=[1., 1., 1.])
     
     pkg = import_module(args.module)
-    net = pkg.Fact_tt_Sam(sam, args.rank, s=args.scale).cuda()
+    # net = pkg.Fact_tt_Sam(sam, args.rank, s=args.scale).cuda()
+    net = pkg.Fact_tt_Sam(sam, args.rank, s=args.scale).to(device)
 
     assert args.adapt_ckpt is not None
     net.load_parameters(args.adapt_ckpt)
@@ -240,4 +249,4 @@ if __name__ == '__main__':
         test_save_path = args.output_dir
     else:
         test_save_path = None
-    inference(args, multimask_output, net, test_save_path)
+    inference(args, multimask_output, net, test_save_path, device)
